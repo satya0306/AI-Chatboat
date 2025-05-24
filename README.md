@@ -2,19 +2,21 @@
 
 ## Project Overview
 
-This project implements an AI-powered chatbot specialized in sports-related queries. Users can ask questions about various sports, and the chatbot, leveraging the OpenAI API, will provide informative answers.
+This project implements an AI-powered chatbot specialized in sports-related queries. Users can ask questions about various sports, and the chatbot, leveraging a large language model (LLM) via Ollama or OpenAI, will provide informative answers.
 
 The application is built with a modern tech stack:
 *   **Frontend:** Next.js (React framework) with TypeScript and Tailwind CSS for a responsive and interactive user interface.
-*   **Backend:** FastAPI (Python web framework) to handle API requests and integrate with the OpenAI API.
-*   **AI:** OpenAI API (specifically, the `gpt-3.5-turbo` model by default) for natural language processing and generating responses.
+*   **Backend:** FastAPI (Python web framework) to handle API requests and integrate with the chosen LLM backend.
+*   **AI:**
+    *   **Default:** Ollama with a local model (e.g., `llama2`). This allows for local, offline inference.
+    *   **Alternative (previous version):** OpenAI API (specifically, the `gpt-3.5-turbo` model). The codebase can be adapted to switch between these.
 
 ## Project Structure
 
 The project is organized into two main directories:
 
 *   `frontend/`: Contains the Next.js application. This is responsible for the user interface, capturing user input, displaying messages, and communicating with the backend.
-*   `backend/`: Contains the FastAPI application. This handles incoming API requests from the frontend, processes them, interacts with the OpenAI API, and sends responses back.
+*   `backend/`: Contains the FastAPI application. This handles incoming API requests from the frontend, processes them, interacts with the configured LLM (Ollama by default), and sends responses back.
 
 During development, the Next.js frontend (typically running on `http://localhost:3000`) uses a proxy to forward API requests from `/api/chatbot` to the FastAPI backend (typically running on `http://127.0.0.1:8000`). This simplifies development by avoiding CORS issues.
 
@@ -48,30 +50,28 @@ To set up and run the backend server, follow these steps:
     pip install -r requirements.txt
     ```
 
-4.  **Set up your OpenAI API Key:**
-    *   **Crucial Step:** The backend needs an OpenAI API key to communicate with the OpenAI service.
-    *   **Obtain an API Key:** If you don't have one, sign up at [OpenAI Platform](https://platform.openai.com/) and generate an API key from your dashboard.
-    *   **Set as Environment Variable:** You must set your API key as an environment variable named `OPENAI_API_KEY`.
-        *   On macOS and Linux (bash/zsh):
-            ```bash
-            export OPENAI_API_KEY='your_actual_openai_api_key'
-            ```
-        *   On Windows (Command Prompt):
-            ```bash
-            set OPENAI_API_KEY=your_actual_openai_api_key
-            ```
-        *   On Windows (PowerShell):
-            ```bash
-            $env:OPENAI_API_KEY='your_actual_openai_api_key'
-            ```
-        (Replace `'your_actual_openai_api_key'` with your actual key.)
-    *   **Security Warning:** Never hardcode your API key directly in the source code or commit it to version control. Using environment variables is a more secure practice. The `.gitignore` file should ideally list any local configuration files that might accidentally contain such keys (though for this project, environment variables are the prescribed method).
+4.  **Set up your LLM Backend (Ollama):**
+    *   **Install Ollama:** Download and install Ollama from [ollama.com](https://ollama.com/). Follow the instructions for your operating system.
+    *   **Pull a Model:** Once Ollama is installed and running, pull a model. The default for this project is `llama2`. Open a terminal and run:
+        ```bash
+        ollama pull llama2
+        ```
+        You can choose other models from the [Ollama Library](https://ollama.com/library) (e.g., `ollama pull mistral`). If you use a different model, set the `OLLAMA_MODEL` environment variable (see step 5).
+    *   **Ensure Ollama is Running:** The Ollama application or service must be running for the backend to connect to it. By default, it runs on `http://localhost:11434`.
 
-5.  **Run the FastAPI server:**
+5.  **Configure Environment Variables (Optional for Ollama):**
+    *   `OLLAMA_MODEL`: If you want to use a model other than the default (`llama2`), set this environment variable. For example:
+        ```bash
+        export OLLAMA_MODEL='mistral' 
+        ```
+        (Use appropriate command for your OS to set environment variables).
+    *   `OLLAMA_API_URL`: If your Ollama service is running on a different URL, set this variable. Defaults to `http://localhost:11434/api/chat`.
+
+6.  **Run the FastAPI server:**
     ```bash
     uvicorn main:app --reload
     ```
-    *   The `--reload` flag enables auto-reloading during development, so the server will restart automatically when you make code changes.
+    *   The `--reload` flag enables auto-reloading during development.
     *   The server will typically be available at `http://127.0.0.1:8000`.
 
 ## Frontend Setup
@@ -109,7 +109,8 @@ To use the AI Sports Chatbot, both the backend and frontend servers must be runn
     *   Open a terminal window (or tab).
     *   Navigate to your project's `backend` directory (e.g., `cd path/to/your_project/backend`).
     *   Activate the Python virtual environment you created earlier (e.g., `source venv/bin/activate` on macOS/Linux, or `venv\\Scripts\\activate` on Windows).
-    *   Ensure your `OPENAI_API_KEY` environment variable is set correctly in this terminal session (as described in the "Backend Setup" section).
+    *   Ensure your Ollama service is running (see "Backend Setup" step 4).
+    *   If you are using a custom Ollama model or URL, ensure the `OLLAMA_MODEL` or `OLLAMA_API_URL` environment variables are set in this terminal session.
     *   Run the backend server:
         ```bash
         uvicorn main:app --reload
@@ -137,26 +138,29 @@ The application follows this flow for each user query:
 
 1.  **User Input:** The user types a message into the chat interface on the Next.js frontend and submits it.
 2.  **Frontend to Backend:** The frontend application sends the user's message as a JSON payload (e.g., `{"question": "Who won the last World Cup?"}`) to its own `/api/chatbot` endpoint. Due to the proxy configuration in `frontend/next.config.mjs`, this request is transparently forwarded during development to the FastAPI backend at `http://127.0.0.1:8000/api/chatbot`.
-3.  **Backend Processing & OpenAI Interaction (Streaming):** The FastAPI backend receives the question. It then constructs a request to the OpenAI API (using the `gpt-3.5-turbo` model by default) with `stream=True`. This includes the user's question and a system prompt ("You are a helpful assistant knowledgeable about all sports.").
-4.  **OpenAI Response (Stream):** The OpenAI API processes the request and, instead of sending the full answer at once, streams back the response token by token.
-5.  **Backend to Frontend (Stream):** The FastAPI backend uses a `StreamingResponse` to send these tokens as they arrive to the Next.js frontend. Each piece of the message is sent as a chunk in a text/event-stream.
+3.  **Backend Processing & Ollama Interaction (Streaming):** The FastAPI backend receives the question. It then constructs a request to the local Ollama API (using the model specified by `OLLAMA_MODEL`, defaulting to `llama2`) with `stream=True`. This includes the user's question and a system prompt ("You are a helpful assistant knowledgeable about all sports.").
+4.  **Ollama Response (Stream):** The Ollama API processes the request with the local LLM and, instead of sending the full answer at once, streams back the response. Each part of the response is a JSON object containing a piece of the generated text.
+5.  **Backend to Frontend (Stream):** The FastAPI backend uses a `StreamingResponse` to send these text pieces as they are extracted from the Ollama stream to the Next.js frontend. Each piece of the message is sent as a chunk in a text/event-stream.
 6.  **Display Answer (Streaming):** The frontend receives these chunks progressively. As each chunk arrives, it's decoded and appended to the current bot message being displayed in the chat interface. This creates the effect of the bot "typing out" its answer in real-time. Error handling is in place for issues during this process.
 
 ## Customization & Further Development
 
 This project serves as a solid foundation. Here are some ideas for customization and further development:
 
-*   **AI Model:** Experiment with different OpenAI models (e.g., newer versions of GPT-3.5 or GPT-4 if you have access and budget) by changing the `model` parameter in `backend/main.py`.
-*   **System Prompt:** Modify the system prompt in `backend/main.py` to change the chatbot's persona, expertise, or response style. For example, you could make it specialize in a single sport or adopt a more humorous tone.
-*   **Styling & UI/UX:** Further enhance the user interface by customizing Tailwind CSS styles in `frontend/src/app/page.tsx` and `frontend/src/app/globals.css`. You could add features like user avatars, message timestamps, or theming options.
-*   **Sports Knowledge Base Enhancement:** For more specialized or real-time sports data, you could integrate external sports APIs (e.g., for live scores, player statistics, match schedules) into the backend. The chatbot could then be programmed to query these APIs based on user questions to provide more dynamic and accurate information.
-*   **Streaming Responses:** The application now implements streaming responses for a more interactive "typing" effect. This can be further refined, for instance, by adding more sophisticated error handling for broken streams or by allowing users to interrupt a long stream.
-*   **Conversation History:** Currently, each query is treated as independent. You could extend the application to maintain conversation history, allowing for follow-up questions and more context-aware responses. This would involve changes in both frontend state management and how requests are sent to the OpenAI API (passing previous messages).
-*   **User Authentication:** If you want to personalize the experience or manage usage, consider adding user authentication.
-*   **Deployment:** Prepare the application for deployment to cloud platforms. Some common choices include:
-    *   **Frontend (Next.js):** Vercel (highly recommended for Next.js), Netlify, AWS Amplify.
-    *   **Backend (FastAPI):** Heroku, AWS Elastic Beanstalk, Google Cloud Run, DigitalOcean App Platform.
-    *   Remember to configure environment variables (like `OPENAI_API_KEY`) in your deployment environment.
+*   **AI Model (Ollama):**
+    *   Experiment with different models available in Ollama by setting the `OLLAMA_MODEL` environment variable (e.g., `mistral`, `codellama`). Ensure you pull the model first (`ollama pull <model_name>`).
+    *   You can also explore fine-tuning models with Ollama if you have specific datasets.
+*   **Alternative LLM Backends:** Modify `backend/main.py` to switch back to OpenAI or integrate other LLM APIs. This could be done with conditional logic based on environment variables.
+*   **System Prompt:** Modify the system prompt in `backend/main.py` to change the chatbot's persona, expertise, or response style.
+*   **Styling & UI/UX:** Further enhance the user interface by customizing Tailwind CSS styles in `frontend/src/app/page.tsx` and `frontend/src/app/globals.css`.
+*   **Sports Knowledge Base Enhancement:** For more specialized or real-time sports data, integrate external sports APIs into the backend.
+*   **Streaming Responses:** The application implements streaming. This can be further refined, for instance, by adding more sophisticated error handling for broken streams or by allowing users to interrupt a long stream.
+*   **Conversation History:** Currently, each query is treated as independent. Extend the application to maintain conversation history.
+*   **User Authentication:** Consider adding user authentication for personalized experiences.
+*   **Deployment:**
+    *   **Frontend (Next.js):** Vercel, Netlify, AWS Amplify.
+    *   **Backend (FastAPI with Ollama):** Deploying a FastAPI app that relies on a local Ollama instance requires a different approach than a typical stateless backend. You'd need a server where you can run both your FastAPI app and the Ollama service with its models. Consider Docker for packaging both.
+    *   Remember to configure environment variables in your deployment environment.
 
 ---
 

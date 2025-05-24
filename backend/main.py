@@ -1,37 +1,52 @@
 import os
+import json
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import openai
 
 app = FastAPI()
 
-# Load OpenAI API Key
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    # This will prevent the app from starting if the key is not set,
-    # which is good for production but might be inconvenient for some dev workflows.
-    raise RuntimeError("OPENAI_API_KEY environment variable not set.")
-
-client = openai.OpenAI(api_key=api_key)
+# Ollama Configuration
+OLLAMA_DEFAULT_MODEL = "llama2"  # Default model if not set by environment variable
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", OLLAMA_DEFAULT_MODEL)
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat") # Ollama API endpoint
 
 class Question(BaseModel):
     question: str
 
-async def stream_generator(openai_stream):
+async def stream_generator(ollama_response: requests.Response):
     """
-    Asynchronous generator to iterate over the OpenAI stream,
-    extract content from each chunk, and yield it.
+    Asynchronous generator to iterate over the Ollama streaming response,
+    parse each JSON line, extract content, and yield it.
     """
     try:
-        for chunk in openai_stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                yield content
+        for line in ollama_response.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                try:
+                    chunk = json.loads(decoded_line)
+                    content = chunk.get('message', {}).get('content', '')
+                    if content:
+                        yield content
+                    
+                    # Check if the stream is done (Ollama specific field)
+                    if chunk.get('done') and not content: # if done is true and there's no more content in this chunk
+                        break
+                except json.JSONDecodeError:
+                    print(f"Error decoding JSON line: {decoded_line}")
+                    # Optionally yield an error message or handle as appropriate
+                    yield f"STREAM_ERROR: Could not parse JSON chunk: {decoded_line}"
+                    break 
+                except Exception as e:
+                    print(f"Error processing chunk: {e}")
+                    yield f"STREAM_ERROR: An error occurred processing a stream chunk: {str(e)}"
+                    break
     except Exception as e:
         print(f"Error during streaming: {e}")
-        # You might want to yield a special error message or handle differently
-        yield f"STREAM_ERROR: An error occurred during streaming: {str(e)}"
+        yield f"STREAM_ERROR: An unexpected error occurred during streaming: {str(e)}"
+    finally:
+        ollama_response.close()
 
 
 @app.post("/api/chatbot")
@@ -40,31 +55,41 @@ async def chatbot_endpoint(request_data: Question):
     if not user_question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    try:
-        # Call OpenAI API with stream=True
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant knowledgeable about all sports."
-                },
-                {
-                    "role": "user",
-                    "content": user_question
-                }
-            ],
-            stream=True,
-        )
-        # Return a StreamingResponse using the generator
-        return StreamingResponse(stream_generator(stream), media_type="text/event-stream")
+    ollama_model_name = OLLAMA_MODEL
 
-    except openai.APIError as e:
-        # Handle OpenAI API specific errors before the stream starts
-        # These are errors like authentication issues, invalid requests before streaming begins
-        print(f"OpenAI API Error before stream: {e.message}")
-        raise HTTPException(status_code=e.status_code or 500, detail=f"OpenAI API Error: {e.message}")
+    payload = {
+        "model": ollama_model_name,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant knowledgeable about all sports."},
+            {"role": "user", "content": user_question}
+        ],
+        "stream": True
+    }
+
+    try:
+        # Make a POST request to the Ollama API
+        response = requests.post(OLLAMA_API_URL, json=payload, stream=True)
+        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+        
+        # Return a StreamingResponse using the generator
+        return StreamingResponse(stream_generator(response), media_type="text/event-stream")
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"Ollama Connection Error: {e}")
+        raise HTTPException(status_code=503, detail="Could not connect to Ollama service. Please ensure Ollama is running.")
+    except requests.exceptions.HTTPError as e:
+        # Handle HTTP errors from Ollama if they were not caught by stream_generator
+        # (e.g. if Ollama itself returns a non-200 error before streaming starts properly)
+        print(f"Ollama HTTP Error: {e}")
+        error_detail = f"Ollama API Error: {e.response.status_code} - {e.response.text}"
+        try:
+            # Try to parse if Ollama returns JSON error
+            ollama_error = e.response.json()
+            error_detail = f"Ollama API Error: {ollama_error.get('error', e.response.text)}"
+        except ValueError:
+            pass # Keep the original text if not JSON
+        raise HTTPException(status_code=e.response.status_code or 500, detail=error_detail)
     except Exception as e:
-        # Handle other potential errors before the stream starts
-        print(f"Generic Error before stream: {str(e)}")
+        # Handle other potential errors
+        print(f"Generic Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
