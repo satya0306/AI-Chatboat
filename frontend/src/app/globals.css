@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background-start-rgb: 243, 244, 246; /* Tailwind gray-100 */
+  --background-end-rgb: 243, 244, 246; /* Tailwind gray-100 */
+
+  --foreground-rgb: 17, 24, 39; /* Tailwind gray-900 */
+
+  --user-message-bg: 37, 99, 235; /* Tailwind blue-600 */
+  --bot-message-bg: 229, 231, 235; /* Tailwind gray-200 */
+  --button-bg: 59, 130, 246; /* Tailwind blue-500 */
+  --button-hover-bg: 37, 99, 235; /* Tailwind blue-600 */
+}
+
+/*
+  Simplifying to a light theme for now, removing dark mode overrides
+  to focus on the primary styling requirements.
+*/
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: rgb(var(--background-start-rgb)); /* Simple background */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
