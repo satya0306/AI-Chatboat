@@ -3,93 +3,152 @@ import json
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import AsyncGenerator
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Allow the Next.js frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Ollama Configuration
 OLLAMA_DEFAULT_MODEL = "llama2"  # Default model if not set by environment variable
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", OLLAMA_DEFAULT_MODEL)
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat") # Ollama API endpoint
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
 
 class Question(BaseModel):
     question: str
 
-async def stream_generator(ollama_response: requests.Response):
+SYSTEM_PROMPT = """You are a knowledgeable sports assistant with expertise in all sports worldwide. 
+Your responses should be:
+1. Accurate and up-to-date
+2. Focused on sports-related information
+3. Clear and concise
+4. Professional but friendly
+Please avoid speculation and clearly indicate if you're unsure about any information."""
+
+async def stream_generator(ollama_response: requests.Response) -> AsyncGenerator[str, None]:
     """
-    Asynchronous generator to iterate over the Ollama streaming response,
-    parse each JSON line, extract content, and yield it.
+    Asynchronous generator to stream Ollama responses.
+    
+    Args:
+        ollama_response (requests.Response): The streaming response from Ollama
+        
+    Yields:
+        str: Content chunks from the response
     """
     try:
         for line in ollama_response.iter_lines():
-            if line:
-                decoded_line = line.decode('utf-8')
-                try:
-                    chunk = json.loads(decoded_line)
-                    content = chunk.get('message', {}).get('content', '')
-                    if content:
-                        yield content
-                    
-                    # Check if the stream is done (Ollama specific field)
-                    if chunk.get('done') and not content: # if done is true and there's no more content in this chunk
-                        break
-                except json.JSONDecodeError:
-                    print(f"Error decoding JSON line: {decoded_line}")
-                    # Optionally yield an error message or handle as appropriate
-                    yield f"STREAM_ERROR: Could not parse JSON chunk: {decoded_line}"
-                    break 
-                except Exception as e:
-                    print(f"Error processing chunk: {e}")
-                    yield f"STREAM_ERROR: An error occurred processing a stream chunk: {str(e)}"
+            if not line:
+                continue
+                
+            try:
+                chunk = json.loads(line.decode('utf-8'))
+                content = chunk.get('message', {}).get('content', '')
+                
+                if content:
+                    yield content
+                
+                if chunk.get('done', False):
                     break
+                    
+            except json.JSONDecodeError as e:
+                error_msg = f"STREAM_ERROR: Invalid JSON response from Ollama: {str(e)}"
+                print(error_msg)
+                yield error_msg
+                break
+                
     except Exception as e:
-        print(f"Error during streaming: {e}")
-        yield f"STREAM_ERROR: An unexpected error occurred during streaming: {str(e)}"
+        error_msg = f"STREAM_ERROR: Stream processing error: {str(e)}"
+        print(error_msg)
+        yield error_msg
+        
     finally:
         ollama_response.close()
 
-
 @app.post("/api/chatbot")
 async def chatbot_endpoint(request_data: Question):
-    user_question = request_data.question
-    if not user_question:
-        raise HTTPException(status_code=400, detail="Question cannot be empty.")
-
-    ollama_model_name = OLLAMA_MODEL
-
-    payload = {
-        "model": ollama_model_name,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant knowledgeable about all sports."},
-            {"role": "user", "content": user_question}
-        ],
-        "stream": True
-    }
+    """
+    Endpoint to handle chat requests and stream responses from Ollama.
+    
+    Args:
+        request_data (Question): The user's question
+        
+    Returns:
+        StreamingResponse: Streamed response from Ollama
+    """
+    if not request_data.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     try:
-        # Make a POST request to the Ollama API
-        response = requests.post(OLLAMA_API_URL, json=payload, stream=True)
-        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-        
-        # Return a StreamingResponse using the generator
-        return StreamingResponse(stream_generator(response), media_type="text/event-stream")
-
-    except requests.exceptions.ConnectionError as e:
-        print(f"Ollama Connection Error: {e}")
-        raise HTTPException(status_code=503, detail="Could not connect to Ollama service. Please ensure Ollama is running.")
-    except requests.exceptions.HTTPError as e:
-        # Handle HTTP errors from Ollama if they were not caught by stream_generator
-        # (e.g. if Ollama itself returns a non-200 error before streaming starts properly)
-        print(f"Ollama HTTP Error: {e}")
-        error_detail = f"Ollama API Error: {e.response.status_code} - {e.response.text}"
+        # Check if Ollama is accessible
         try:
-            # Try to parse if Ollama returns JSON error
-            ollama_error = e.response.json()
-            error_detail = f"Ollama API Error: {ollama_error.get('error', e.response.text)}"
-        except ValueError:
-            pass # Keep the original text if not JSON
-        raise HTTPException(status_code=e.response.status_code or 500, detail=error_detail)
+            requests.get("http://localhost:11434/api/version", timeout=2)
+        except requests.exceptions.RequestException:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not connect to Ollama. Please ensure Ollama is running on port 11434."
+            )
+
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": request_data.question}
+            ],
+            "stream": True
+        }
+
+        response = requests.post(
+            OLLAMA_API_URL,
+            json=payload,
+            stream=True,
+            timeout=30  # Add timeout to prevent hanging
+        )
+        response.raise_for_status()
+        
+        return StreamingResponse(
+            stream_generator(response),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+            }
+        )
+
+    except requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail="Request to Ollama timed out. Please try again."
+        )
+        
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not connect to Ollama service. Please ensure Ollama is running."
+        )
+        
+    except requests.exceptions.HTTPError as e:
+        error_detail = "Ollama API Error"
+        try:
+            error_detail = e.response.json().get('error', str(e))
+        except:
+            error_detail = str(e)
+            
+        raise HTTPException(
+            status_code=e.response.status_code or 500,
+            detail=error_detail
+        )
+        
     except Exception as e:
-        # Handle other potential errors
-        print(f"Generic Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )

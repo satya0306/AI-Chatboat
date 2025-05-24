@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, FormEvent, useEffect, useRef } from 'react';
+import { useState, FormEvent, useEffect, useRef, useCallback } from 'react';
 
 interface Message {
   id: string;
   text: string;
   sender: 'user' | 'bot';
-  isError?: boolean; // Optional flag for error messages
+  isError?: boolean;
+  retryFn?: () => Promise<void>;
 }
 
 export default function Home() {
@@ -27,23 +28,14 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-
-    const userMessage: Message = { id: Date.now().toString(), text: input, sender: 'user' };
-    setMessages((prevMessages) => [...prevMessages, userMessage]);
-    const currentInput = input; // Store before clearing
-    setInput('');
-    setIsLoading(true);
-
+  const sendMessage = async (messageText: string): Promise<void> => {
     try {
       const response = await fetch('/api/chatbot', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ question: currentInput }), // Use stored input
+        body: JSON.stringify({ question: messageText }),
       });
 
       if (!response.ok) {
@@ -80,55 +72,80 @@ export default function Home() {
         );
       }
 
-      // Final decode call to handle any remaining bytes
+      // Final decode
       const finalChunk = decoder.decode();
       if (finalChunk) {
-          accumulatedResponse += finalChunk;
-          setMessages((prevMessages) =>
-            prevMessages.map((msg) =>
-              msg.id === botMessageId ? { ...msg, text: accumulatedResponse } : msg
-            )
-          );
+        accumulatedResponse += finalChunk;
+        setMessages((prevMessages) =>
+          prevMessages.map((msg) =>
+            msg.id === botMessageId ? { ...msg, text: accumulatedResponse } : msg
+          )
+        );
       }
-
 
       if (accumulatedResponse.startsWith("STREAM_ERROR:")) {
-          setMessages((prevMessages) =>
-            prevMessages.map((msg) =>
-              msg.id === botMessageId ? { ...msg, text: accumulatedResponse.replace("STREAM_ERROR: ", ""), isError: true } : msg
-            )
-          );
+        throw new Error(accumulatedResponse.replace("STREAM_ERROR: ", ""));
       }
-
 
     } catch (error) {
       console.error("Failed to fetch chatbot response:", error);
-      const errorText = error instanceof Error ? error.message : "Sorry, an unexpected error occurred. Please try again.";
-      // If an error occurs, try to update the last bot message if it exists, or add a new error message.
+      const errorText = error instanceof Error ? error.message : "An unexpected error occurred. Please try again.";
+      
       setMessages((prevMessages) => {
-        const lastMessage = prevMessages[prevMessages.length -1];
+        const lastMessage = prevMessages[prevMessages.length - 1];
         if (lastMessage && lastMessage.sender === 'bot' && lastMessage.text === "") {
-          // Update the placeholder if it was the last one added
+          // Update the placeholder with error and retry function
           return prevMessages.map((msg, index) =>
-            index === prevMessages.length - 1 ? { ...msg, text: errorText, isError: true } : msg
+            index === prevMessages.length - 1 
+              ? { 
+                  ...msg, 
+                  text: errorText, 
+                  isError: true,
+                  retryFn: () => sendMessage(messageText)
+                } 
+              : msg
           );
         } else {
-          // Otherwise, add a new error message
+          // Add new error message with retry function
           return [
             ...prevMessages,
-            { id: (Date.now() + 2).toString(), text: errorText, sender: 'bot', isError: true }
+            { 
+              id: (Date.now() + 2).toString(), 
+              text: errorText, 
+              sender: 'bot', 
+              isError: true,
+              retryFn: () => sendMessage(messageText)
+            }
           ];
         }
       });
+      throw error; // Re-throw to be caught by handleSubmit
+    }
+  };
+
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const userMessage: Message = { id: Date.now().toString(), text: input, sender: 'user' };
+    setMessages((prevMessages) => [...prevMessages, userMessage]);
+    const currentInput = input;
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      await sendMessage(currentInput);
+    } catch (error) {
+      // Error is handled in sendMessage
     } finally {
       setIsLoading(false);
-      inputRef.current?.focus(); // Re-focus input
+      inputRef.current?.focus();
     }
   };
 
   return (
     <main className="flex flex-col items-center justify-center min-h-screen p-4 bg-gray-100 font-sans">
-      <div className="w-full max-w-2xl bg-white shadow-xl rounded-lg flex flex-col h-[calc(100vh-40px)] sm:h-[calc(100vh-80px)] md:h-[700px] lg:h-[750px]"> {/* Adjusted height for larger screens too */}
+      <div className="w-full max-w-2xl bg-white shadow-xl rounded-lg flex flex-col h-[calc(100vh-40px)] sm:h-[calc(100vh-80px)] md:h-[700px] lg:h-[750px]">
         <header className="bg-blue-600 text-white p-4 rounded-t-lg shadow">
           <h1 className="text-xl sm:text-2xl font-semibold text-center tracking-tight">
             AI Sports Chatbot
@@ -159,21 +176,33 @@ export default function Home() {
                     : msg.isError ? 'bg-red-100 text-red-700 border border-red-300' : 'bg-gray-200 text-gray-800'
                   } ${isLoading && messages[messages.length -1].id === msg.id && msg.sender === 'bot' && msg.text === "" ? 'opacity-0 animate-pulse' : 'opacity-100'}`}
               >
-                {/* Render "Bot is typing..." only for the last empty bot message during loading */}
-                {isLoading && messages[messages.length -1].id === msg.id && msg.sender === 'bot' && msg.text === ""
-                  ? (
+                <div className="flex flex-col">
+                  {isLoading && messages[messages.length -1].id === msg.id && msg.sender === 'bot' && msg.text === "" ? (
                     <div className="flex items-center">
                       <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500 mr-2"></div>
                       <span className="text-sm text-gray-600">Bot is typing...</span>
                     </div>
-                  )
-                  : msg.text
-                }
+                  ) : (
+                    <>
+                      <span>{msg.text}</span>
+                      {msg.isError && msg.retryFn && (
+                        <button
+                          onClick={() => {
+                            setIsLoading(true);
+                            msg.retryFn?.().finally(() => setIsLoading(false));
+                          }}
+                          className="mt-2 text-sm text-blue-600 hover:text-blue-800 underline focus:outline-none"
+                        >
+                          Retry
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           ))}
-          <div ref={messagesEndRef} /> {/* For auto-scroll */}
-          {/* Remove the old global isLoading indicator from here as it's handled per message now */}
+          <div ref={messagesEndRef} />
         </div>
 
         <form onSubmit={handleSubmit} className="flex items-center gap-2 p-3 sm:p-4 border-t border-gray-200 bg-white rounded-b-lg shadow-inner">
@@ -197,7 +226,7 @@ export default function Home() {
         </form>
       </div>
       <footer className="text-center text-gray-500 text-sm mt-4 pb-2">
-        Powered by Next.js, FastAPI, and OpenAI
+        Powered by Next.js, FastAPI, and Ollama
       </footer>
     </main>
   );
